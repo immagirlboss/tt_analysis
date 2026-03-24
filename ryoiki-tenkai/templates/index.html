@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Ryoiki Tenkai</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@900&family=Cinzel:wght@400;900&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Cinzel',serif}
+#c{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:0}
+#webcam{
+  position:fixed;bottom:20px;right:20px;width:200px;height:150px;
+  border-radius:10px;z-index:20;object-fit:cover;transform:scaleX(-1);
+  border:1px solid rgba(140,0,255,.5);
+  box-shadow:0 0 24px rgba(140,0,255,.4),0 0 60px rgba(140,0,255,.15);
+}
+#hud{
+  position:fixed;top:0;left:0;width:100vw;height:100vh;
+  z-index:10;pointer-events:none;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+}
+#title{
+  font-family:'Noto Serif JP',serif;font-size:80px;font-weight:900;
+  color:#fff;text-align:center;letter-spacing:4px;
+  opacity:0;transform:scale(.85);
+  transition:opacity .25s ease-out,transform .25s ease-out;
+  text-shadow:0 0 40px currentColor,0 0 100px currentColor;
+}
+#sub{
+  font-family:'Cinzel',serif;font-size:13px;letter-spacing:10px;
+  color:rgba(255,255,255,.65);text-align:center;margin-top:14px;
+  opacity:0;transition:opacity .3s .15s;
+}
+#badge{
+  position:fixed;top:22px;left:50%;transform:translateX(-50%);
+  font-size:10px;letter-spacing:7px;color:rgba(180,80,255,.7);
+  opacity:0;transition:opacity .3s;
+}
+#flash{
+  position:fixed;top:0;left:0;width:100vw;height:100vh;
+  background:#fff;opacity:0;z-index:15;pointer-events:none;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div>
+<video id="webcam" autoplay muted playsinline></video>
+<div id="hud">
+  <div id="title"></div>
+  <div id="sub"></div>
+</div>
+<div id="badge"></div>
+
+<script>
+// ═══════════════════════════════════════════
+// CANVAS 2D — reliable, no WebGL issues
+// Using offscreen + compositing for glow
+// ═══════════════════════════════════════════
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+canvas.width  = window.innerWidth;
+canvas.height = window.innerHeight;
+window.addEventListener('resize', () => {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+
+const W = () => canvas.width;
+const H = () => canvas.height;
+
+// ═══════════════════════════════════════════
+// PARTICLE POOL — typed arrays, no GC
+// ═══════════════════════════════════════════
+const MAX   = 15000;
+const px    = new Float32Array(MAX);
+const py    = new Float32Array(MAX);
+const pvx   = new Float32Array(MAX);
+const pvy   = new Float32Array(MAX);
+const plife = new Float32Array(MAX);
+const pmaxl = new Float32Array(MAX);
+const pr    = new Uint8Array(MAX);
+const pg    = new Uint8Array(MAX);
+const pb    = new Uint8Array(MAX);
+const psz   = new Float32Array(MAX);
+let   pN    = 0;
+
+function spawn(x,y,vx,vy,life,r,g,b,size) {
+  if (pN >= MAX) return;
+  const i = pN++;
+  px[i]=x; py[i]=y; pvx[i]=vx; pvy[i]=vy;
+  plife[i]=life; pmaxl[i]=life;
+  pr[i]=r; pg[i]=g; pb[i]=b; psz[i]=size;
+}
+
+function tickAndDrawParticles() {
+  let live = 0;
+  for (let i = 0; i < pN; i++) {
+    plife[i]--;
+    if (plife[i] <= 0) continue;
+    px[i] += pvx[i];
+    py[i] += pvy[i];
+
+    const ratio = plife[i] / pmaxl[i];
+    const r = psz[i] * ratio;
+    if (r < 0.3) continue;
+
+    ctx.globalAlpha = ratio * 0.85;
+    ctx.fillStyle   = `rgb(${pr[i]},${pg[i]},${pb[i]})`;
+    ctx.beginPath();
+    ctx.arc(px[i], py[i], r, 0, 6.2832);
+    ctx.fill();
+
+    // compact alive
+    px[live]=px[i]; py[live]=py[i];
+    pvx[live]=pvx[i]; pvy[live]=pvy[i];
+    plife[live]=plife[i]; pmaxl[live]=pmaxl[i];
+    pr[live]=pr[i]; pg[live]=pg[i]; pb[live]=pb[i];
+    psz[live]=psz[i]; live++;
+  }
+  pN = live;
+  ctx.globalAlpha = 1;
+}
+
+// ═══════════════════════════════════════════
+// LIGHTNING
+// ═══════════════════════════════════════════
+function bolt(x1,y1,x2,y2,rough,col,w,depth) {
+  if (depth===0 || Math.hypot(x2-x1,y2-y1)<8) {
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+    ctx.strokeStyle=col; ctx.lineWidth=w;
+    ctx.shadowBlur=16; ctx.shadowColor=col; ctx.stroke();
+    return;
+  }
+  const mx=(x1+x2)/2+(Math.random()-.5)*rough;
+  const my=(y1+y2)/2+(Math.random()-.5)*rough;
+  bolt(x1,y1,mx,my,rough*.6,col,w*.8,depth-1);
+  bolt(mx,my,x2,y2,rough*.6,col,w*.8,depth-1);
+  if (Math.random()<.35) bolt(mx,my,
+    mx+(Math.random()-.5)*rough*1.2,
+    my+(Math.random()-.5)*rough*1.2,
+    rough*.4,col,w*.4,depth-2);
+}
+
+function boltBurst(cx,cy,col,count,reach) {
+  ctx.save();
+  ctx.shadowBlur=20; ctx.shadowColor=col;
+  for (let i=0;i<count;i++) {
+    const a=Math.random()*6.2832;
+    const r=reach*(.5+Math.random()*.5);
+    bolt(cx,cy,cx+Math.cos(a)*r,cy+Math.sin(a)*r,55,col,1.5,4);
+  }
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════
+// SHOCKWAVES
+// ═══════════════════════════════════════════
+const shocks=[];
+function addShock(cx,cy,col,r=20) {
+  shocks.push({cx,cy,r,col,alpha:.9,spd:20});
+}
+function drawShocks() {
+  for (let i=shocks.length-1;i>=0;i--) {
+    const s=shocks[i];
+    s.r+=s.spd; s.spd*=1.05; s.alpha*=.88;
+    if (s.alpha<.01){shocks.splice(i,1);continue;}
+    ctx.beginPath(); ctx.arc(s.cx,s.cy,s.r,0,6.2832);
+    ctx.strokeStyle=s.col;
+    ctx.lineWidth=2+s.alpha*5;
+    ctx.globalAlpha=s.alpha;
+    ctx.shadowBlur=24; ctx.shadowColor=s.col;
+    ctx.stroke();
+    ctx.shadowBlur=0; ctx.globalAlpha=1;
+  }
+}
+
+// ═══════════════════════════════════════════
+// UI
+// ═══════════════════════════════════════════
+const titleEl=document.getElementById('title');
+const subEl  =document.getElementById('sub');
+const flashEl=document.getElementById('flash');
+const badgeEl=document.getElementById('badge');
+
+function showTitle(jp,en,color) {
+  titleEl.style.color=color;
+  titleEl.style.textShadow=`0 0 40px ${color},0 0 100px ${color}`;
+  titleEl.innerHTML=jp; subEl.textContent=en;
+  requestAnimationFrame(()=>{
+    titleEl.style.opacity='1'; titleEl.style.transform='scale(1)';
+    subEl.style.opacity='1';
+  });
+}
+function hideTitle() {
+  titleEl.style.opacity='0'; titleEl.style.transform='scale(1.06)';
+  subEl.style.opacity='0';
+}
+function flash(v=.9) {
+  flashEl.style.transition='none'; flashEl.style.opacity=v;
+  setTimeout(()=>{flashEl.style.transition='opacity .4s'; flashEl.style.opacity=0;},35);
+}
+
+// ═══════════════════════════════════════════
+// ANIMATION STATE
+// ═══════════════════════════════════════════
+let gesture='idle', animT=0, animOn=false;
+const DUR=240;
+let vRipple=0, sAngle=0, bTimer=0;
+
+function reset() {
+  pN=0; shocks.length=0;
+  vRipple=0; sAngle=0; bTimer=0;
+  hideTitle();
+  ctx.clearRect(0,0,W(),H());
+}
+
+// ═══════════════════════════════════════════
+// ANIM 1 — INFINITE VOID
+// ═══════════════════════════════════════════
+function animVoid(t) {
+  const prog=t/DUR;
+  const cx=W()/2, cy=H()/2;
+
+  // darken with vignette
+  const vg=ctx.createRadialGradient(cx,cy,0,cx,cy,W()*.8);
+  vg.addColorStop(0,`rgba(8,0,18,${.55+prog*.3})`);
+  vg.addColorStop(1,`rgba(0,0,0,${.7+prog*.2})`);
+  ctx.fillStyle=vg; ctx.fillRect(0,0,W(),H());
+
+  // stream particles from edges toward center
+  if (t<DUR*.85) {
+    for (let i=0;i<55;i++) {
+      let sx,sy;
+      const e=Math.random();
+      if     (e<.25){sx=Math.random()*W();sy=-10;}
+      else if(e<.50){sx=Math.random()*W();sy=H()+10;}
+      else if(e<.75){sx=-10;sy=Math.random()*H();}
+      else          {sx=W()+10;sy=Math.random()*H();}
+
+      const dx=cx-sx,dy=cy-sy,dist=Math.hypot(dx,dy);
+      const spd=5+Math.random()*9;
+      const sw=.3*(Math.random()-.5);
+      const vx=(dx/dist)*spd+(dy/dist)*sw*spd;
+      const vy=(dy/dist)*spd-(dx/dist)*sw*spd;
+      const lf=dist/spd+Math.random()*8;
+
+      const w=Math.random();
+      let r,g,b;
+      if     (w<.25){r=255;g=255;b=255;}
+      else if(w<.55){r=180;g=80; b=255;}
+      else if(w<.80){r=100;g=150;b=255;}
+      else          {r=220;g=0;  b=255;}
+      spawn(sx,sy,vx,vy,lf,r,g,b,2+Math.random()*2.5);
+    }
+  }
+
+  // vortex core glow
+  const cr=15+prog*55;
+  const cg=ctx.createRadialGradient(cx,cy,0,cx,cy,cr*2.5);
+  cg.addColorStop(0,'rgba(255,255,255,.9)');
+  cg.addColorStop(.25,'rgba(170,70,255,.75)');
+  cg.addColorStop(.65,'rgba(50,0,100,.35)');
+  cg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=cg; ctx.beginPath(); ctx.arc(cx,cy,cr*2.5,0,6.2832); ctx.fill();
+
+  // ripple rings
+  vRipple+=.9;
+  ctx.save(); ctx.shadowBlur=0;
+  for (let r=0;r<5;r++) {
+    const rr=(vRipple+r*65)%(W()*.85);
+    const ra=Math.max(0,1-rr/(W()*.7));
+    ctx.beginPath(); ctx.arc(cx,cy,rr,0,6.2832);
+    ctx.strokeStyle=`rgba(120,50,220,${ra*.35})`;
+    ctx.lineWidth=1.2; ctx.stroke();
+  }
+  ctx.restore();
+
+  // lightning from core
+  bTimer++;
+  if (bTimer%8===0) {
+    boltBurst(cx,cy,'rgba(190,90,255,.85)',7,cr*4);
+    boltBurst(cx,cy,'rgba(255,255,255,.5)',3,cr*2);
+  }
+
+  tickAndDrawParticles();
+  if (t===25)     showTitle('無量空処','INFINITE VOID','#cc44ff');
+  if (t===DUR-25) hideTitle();
+}
+
+// ═══════════════════════════════════════════
+// ANIM 2 — HOLLOW PURPLE CHARGE
+// ═══════════════════════════════════════════
+function animCharge(t) {
+  const prog=t/DUR;
+  const fuse=Math.max(0,(prog-.55)/.45);
+  const cx=W()/2, cy=H()/2;
+
+  ctx.fillStyle='rgba(0,0,0,.72)';
+  ctx.fillRect(0,0,W(),H());
+
+  sAngle+=.022*(1+fuse*3);
+  const sep=W()*.2*(1-fuse*.96);
+  const bx=cx+Math.cos(sAngle)*sep;
+  const by=cy+Math.sin(sAngle)*sep*.35;
+  const rx=cx+Math.cos(sAngle+Math.PI)*sep;
+  const ry=cy+Math.sin(sAngle+Math.PI)*sep*.35;
+  const sR=70+prog*50+fuse*30;
+
+  // spawn shell particles
+  for (let i=0;i<28;i++) {
+    // BLUE
+    const a=Math.random()*6.2832;
+    const d=sR*(.7+Math.random()*.6);
+    const sx=bx+Math.cos(a)*d, sy=by+Math.sin(a)*d*.6;
+    spawn(sx,sy,-Math.sin(a)*1.4+(bx-sx)*.007, Math.cos(a)*1.4+(by-sy)*.007,
+      40+Math.random()*20, 30,140,255, 1.5+Math.random()*2);
+
+    // RED
+    const a2=Math.random()*6.2832;
+    const d2=sR*(.7+Math.random()*.6);
+    const sx2=rx+Math.cos(a2)*d2, sy2=ry+Math.sin(a2)*d2*.6;
+    spawn(sx2,sy2,-Math.sin(a2)*1.4+(rx-sx2)*.007, Math.cos(a2)*1.4+(ry-sy2)*.007,
+      40+Math.random()*20, 255,40,30, 1.5+Math.random()*2);
+  }
+
+  // fusion stream
+  if (fuse>.1) {
+    for (let i=0;i<18;i++) {
+      const a=Math.random()*6.2832, d=sR*2;
+      const spd=3+fuse*6;
+      spawn(cx+Math.cos(a)*d,cy+Math.sin(a)*d,
+        -Math.cos(a)*spd,-Math.sin(a)*spd,
+        18+Math.random()*12, 180,50,255, 1.5+Math.random()*1.5);
+    }
+  }
+
+  tickAndDrawParticles();
+
+  // orb glows
+  const drawOrb=(ox,oy,r,g,b)=>{
+    const og=ctx.createRadialGradient(ox,oy,0,ox,oy,sR+25);
+    og.addColorStop(0,`rgba(255,255,255,${.92-fuse*.3})`);
+    og.addColorStop(.25,`rgba(${r},${g},${b},${.85-fuse*.2})`);
+    og.addColorStop(.7,`rgba(${r>>1},${g>>1},${b>>1},.28)`);
+    og.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=og; ctx.beginPath(); ctx.arc(ox,oy,sR+25,0,6.2832); ctx.fill();
+  };
+  drawOrb(bx,by,30,140,255);
+  drawOrb(rx,ry,255,40,30);
+
+  // arcs between orbs
+  bTimer++;
+  if (fuse>.2 && bTimer%3===0) {
+    for (let i=0;i<2+Math.floor(fuse*5);i++)
+      bolt(bx,by,rx,ry,40+fuse*80,`rgba(200,100,255,${.4+fuse*.5})`,1+fuse*1.5,4);
+  }
+
+  if (fuse>.97) { flash(.8); addShock(cx,cy,'#dd44ff',10); addShock(cx,cy,'#ffffff',5); }
+  drawShocks();
+
+  if (t===18)           showTitle('蒼　赫','BLUE · RED','#66aaff');
+  if (fuse>.45&&fuse<.5)showTitle('紫','CONVERGING','#dd44ff');
+  if (t===DUR-20)       hideTitle();
+}
+
+// ═══════════════════════════════════════════
+// ANIM 3 — HOLLOW PURPLE RELEASE
+// ═══════════════════════════════════════════
+function animRelease(t) {
+  const prog=t/DUR;
+  const cx=W()/2, cy=H()/2;
+  const gather  =prog<.25;
+  const compress=prog>=.25&&prog<.45;
+  const explode =prog>=.45;
+
+  ctx.fillStyle='rgba(0,0,0,.7)';
+  ctx.fillRect(0,0,W(),H());
+
+  if (gather) {
+    const ep=prog/.25;
+    const sR=W()*.55;
+    for (let i=0;i<60;i++) {
+      const a=Math.random()*6.2832, d=sR*(.6+Math.random()*.5);
+      const spd=4+Math.random()*5;
+      const w=Math.random();
+      let r,g,b;
+      if(w<.2){r=255;g=255;b=255;}
+      else if(w<.6){r=180;g=30;b=255;}
+      else{r=140;g=0;b=200;}
+      spawn(cx+Math.cos(a)*d,cy+Math.sin(a)*d,
+        -Math.cos(a)*spd,-Math.sin(a)*spd,
+        d/spd+5, r,g,b, 1.5+Math.random()*2);
+    }
+    // growing core
+    const cr=20+ep*80;
+    const cg=ctx.createRadialGradient(cx,cy,0,cx,cy,cr);
+    cg.addColorStop(0,'rgba(255,220,255,.85)');
+    cg.addColorStop(.5,'rgba(160,0,255,.6)');
+    cg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=cg; ctx.beginPath(); ctx.arc(cx,cy,cr,0,6.2832); ctx.fill();
+  }
+
+  if (compress) {
+    const cp=(prog-.25)/.2;
+    bTimer++;
+    if (bTimer%2===0) {
+      boltBurst(cx,cy,'rgba(220,100,255,.9)',10+Math.floor(cp*8),60+cp*130);
+      boltBurst(cx,cy,'rgba(255,255,255,.7)',5+Math.floor(cp*4),30+cp*65);
+    }
+    for (let i=0;i<50;i++) {
+      const a=Math.random()*6.2832, d=80+cp*50;
+      const spd=5+cp*8;
+      spawn(cx+Math.cos(a)*d,cy+Math.sin(a)*d,
+        -Math.cos(a)*spd,-Math.sin(a)*spd,
+        14, 230,100,255, 1.5+Math.random()*1.5);
+    }
+    // compressed sphere
+    const cr=90-cp*65;
+    const cg=ctx.createRadialGradient(cx,cy,0,cx,cy,cr+15);
+    cg.addColorStop(0,'rgba(255,255,255,1)');
+    cg.addColorStop(.3,'rgba(220,100,255,.95)');
+    cg.addColorStop(.7,'rgba(100,0,200,.5)');
+    cg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=cg; ctx.beginPath(); ctx.arc(cx,cy,cr+15,0,6.2832); ctx.fill();
+    if (cp>.97) { flash(1); addShock(cx,cy,'#ee44ff',6); addShock(cx,cy,'#ffffff',4); addShock(cx,cy,'#bb00ff',9); }
+  }
+
+  if (explode) {
+    const ep=(prog-.45)/.55;
+    if (ep<.65) {
+      for (let i=0;i<80;i++) {
+        const a=Math.random()*6.2832;
+        const spd=9+ep*16+Math.random()*8;
+        const w=Math.random();
+        let r,g,b;
+        if(w<.2){r=255;g=255;b=255;}
+        else if(w<.55){r=220;g=50;b=255;}
+        else if(w<.8){r=160;g=0;b=230;}
+        else{r=255;g=150;b=255;}
+        spawn(cx+Math.cos(a)*8,cy+Math.sin(a)*8,
+          Math.cos(a)*spd,Math.sin(a)*spd,
+          22+Math.random()*18, r,g,b, 2+Math.random()*3);
+      }
+    }
+    bTimer++;
+    if (bTimer%12===0&&ep<.8) addShock(cx,cy,'#cc44ff',15);
+    if (ep<.45&&bTimer%3===0) {
+      boltBurst(cx,cy,'rgba(255,140,255,.9)',14,100+ep*260);
+      boltBurst(cx,cy,'rgba(255,255,255,.6)',6,50+ep*120);
+    }
+  }
+
+  tickAndDrawParticles();
+  drawShocks();
+
+  if (t===5)         { showTitle('虚式「茈」','HOLLOW PURPLE','#ee44ff'); flash(.25); }
+  if (t===DUR*.44|0) hideTitle();
+  if (t===DUR*.58|0) showTitle('茈','RELEASE','#ff88ff');
+  if (t===DUR-15)    hideTitle();
+}
+
+// ═══════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════
+function triggerGesture(name) {
+  gesture=name; animT=0; animOn=true;
+  reset();
+}
+
+function tick() {
+  requestAnimationFrame(tick);
+  // motion blur trail
+  ctx.fillStyle='rgba(0,0,0,.2)';
+  ctx.fillRect(0,0,W(),H());
+
+  if (animOn && animT<DUR) {
+    if     (gesture==='infinite_void')         animVoid(animT);
+    else if(gesture==='hollow_purple_charge')  animCharge(animT);
+    else if(gesture==='hollow_purple_release') animRelease(animT);
+    animT++;
+  } else if (animT>=DUR) {
+    animOn=false; reset();
+  }
+}
+tick();
+
+// ═══════════════════════════════════════════
+// WEBCAM
+// ═══════════════════════════════════════════
+navigator.mediaDevices.getUserMedia({video:true})
+  .then(s=>document.getElementById('webcam').srcObject=s)
+  .catch(()=>{});
+
+// ═══════════════════════════════════════════
+// SOCKET
+// ═══════════════════════════════════════════
+const socket=io({transports:['websocket']});
+socket.on('connect',()=>console.log('✅ connected'));
+socket.on('g', data=>{
+  badgeEl.textContent=data.n==='idle'?'':data.n.replace(/_/g,' ').toUpperCase();
+  badgeEl.style.opacity=data.n==='idle'?'0':'1';
+  if (data.n!=='idle') triggerGesture(data.n);
+});
+
+// keyboard test
+document.addEventListener('keydown',e=>{
+  const map={'1':'infinite_void','2':'hollow_purple_charge','3':'hollow_purple_release'};
+  if (map[e.key]) triggerGesture(map[e.key]);
+});
+</script>
+</body>
+</html>
