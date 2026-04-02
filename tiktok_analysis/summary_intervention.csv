@@ -1,0 +1,6 @@
+intervention_type,event_count,avg_dropoff_pct,avg_severity,total_ccv_lost_sample,avg_ccv_lost_per_event
+audio_mute,1152,34.3,2.14,2577245,2237.0
+stream_pause,734,22.4,3.49,1054454,1437.0
+content_warning_overlay,975,17.7,1.8,1131995,1161.0
+escalated_review_flag,719,15.3,3.99,929472,1293.0
+caption_text_removal,620,12.3,1.4,524707,846.0

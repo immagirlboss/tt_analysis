@@ -1,0 +1,4 @@
+detection_method,event_count,pct_of_total,avg_dropoff_pct,proactive_removal_pct,removed_24h_pct
+automated,3443,82.0,21.9,98.3,94.2
+human_review,439,10.5,21.2,97.7,95.0
+user_report,318,7.6,22.0,99.4,94.7
